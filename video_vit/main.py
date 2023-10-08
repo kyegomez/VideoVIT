@@ -417,4 +417,3 @@ class VideoVit(nn.Module):
             return x
 
         return self.mlp_head(x)
-
