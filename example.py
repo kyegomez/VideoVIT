@@ -4,15 +4,15 @@ from video_vit.main import VideoViT
 
 # Instantiate the model
 model = VideoViT(
-    num_classes=10, 
-    dim=64, 
-    depth=(2, 2, 2), 
-    dim_head=32, 
-    window_size=7, 
-    mbconv_expansion_rate=4, 
-    mbconv_shrinkage_rate=0.25, 
-    dropout=0.1, 
-    channels=3
+    num_classes=10,
+    dim=64,
+    depth=(2, 2, 2),
+    dim_head=32,
+    window_size=7,
+    mbconv_expansion_rate=4,
+    mbconv_shrinkage_rate=0.25,
+    dropout=0.1,
+    channels=3,
 )
 
 # Create a random tensor with shape (batch_size, channels, frames, height, width)

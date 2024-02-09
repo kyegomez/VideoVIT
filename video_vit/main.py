@@ -9,7 +9,6 @@ from einops import pack, unpack, repeat, rearrange
 from einops.layers.torch import Rearrange, Reduce
 
 
-
 # helpers
 
 
@@ -36,7 +35,9 @@ def unpack_one(x, ps, pattern):
 # sinusoidal positions
 
 
-def posemb_sincos_1d(seq, dim, temperature=10000, device=None, dtype=torch.float32):
+def posemb_sincos_1d(
+    seq, dim, temperature=10000, device=None, dtype=torch.float32
+):
     n = torch.arange(seq, device=device)
     omega = torch.arange(dim // 2, device=device) / (dim // 2 - 1)
     omega = 1.0 / (temperature**omega)
@@ -137,14 +138,22 @@ class Dropsample(nn.Module):
             return x
 
         keep_mask = (
-            torch.FloatTensor((x.shape[0], 1, 1, 1), device=device).uniform_()
+            torch.FloatTensor(
+                (x.shape[0], 1, 1, 1), device=device
+            ).uniform_()
             > self.prob
         )
         return x * keep_mask / (1 - self.prob)
 
 
 def MBConv(
-    dim_in, dim_out, *, downsample, expansion_rate=4, shrinkage_rate=0.25, dropout=0.0
+    dim_in,
+    dim_out,
+    *,
+    downsample,
+    expansion_rate=4,
+    shrinkage_rate=0.25,
+    dropout=0.0,
 ):
     hidden_dim = int(expansion_rate * dim_out)
     stride = 2 if downsample else 1
@@ -154,7 +163,12 @@ def MBConv(
         nn.BatchNorm2d(hidden_dim),
         nn.GELU(),
         nn.Conv2d(
-            hidden_dim, hidden_dim, 3, stride=stride, padding=1, groups=hidden_dim
+            hidden_dim,
+            hidden_dim,
+            3,
+            stride=stride,
+            padding=1,
+            groups=hidden_dim,
         ),
         nn.BatchNorm2d(hidden_dim),
         nn.GELU(),
@@ -173,7 +187,14 @@ def MBConv(
 
 
 class Attention(nn.Module):
-    def __init__(self, dim, dim_head=32, dropout=0.0, window_size=7, num_mem_kv=4):
+    def __init__(
+        self,
+        dim,
+        dim_head=32,
+        dropout=0.0,
+        window_size=7,
+        num_mem_kv=4,
+    ):
         super().__init__()
         assert (
             dim % dim_head
@@ -186,9 +207,13 @@ class Attention(nn.Module):
 
         self.to_qkv = nn.Linear(dim, dim * 3, bias=False)
 
-        self.mem_kv = nn.Parameter(torch.randn(2, self.heads, num_mem_kv, dim_head))
+        self.mem_kv = nn.Parameter(
+            torch.randn(2, self.heads, num_mem_kv, dim_head)
+        )
 
-        self.attend = nn.Sequential(nn.Softmax(dim=-1), nn.Dropout(dropout))
+        self.attend = nn.Sequential(
+            nn.Softmax(dim=-1), nn.Dropout(dropout)
+        )
 
         self.to_out = nn.Sequential(
             nn.Linear(dim, dim, bias=False), nn.Dropout(dropout)
@@ -196,7 +221,9 @@ class Attention(nn.Module):
 
         # relative positional bias
 
-        self.rel_pos_bias = nn.Embedding((2 * window_size - 1) ** 2, self.heads)
+        self.rel_pos_bias = nn.Embedding(
+            (2 * window_size - 1) ** 2, self.heads
+        )
 
         pos = torch.arange(window_size)
         grid = torch.stack(torch.meshgrid(pos, pos, indexing="ij"))
@@ -205,12 +232,25 @@ class Attention(nn.Module):
             grid, "j ... -> 1 j ..."
         )
         rel_pos += window_size - 1
-        rel_pos_indices = (rel_pos * torch.tensor([2 * window_size - 1, 1])).sum(dim=-1)
+        rel_pos_indices = (
+            rel_pos * torch.tensor([2 * window_size - 1, 1])
+        ).sum(dim=-1)
 
-        self.register_buffer("rel_pos_indices", rel_pos_indices, persistent=False)
+        self.register_buffer(
+            "rel_pos_indices", rel_pos_indices, persistent=False
+        )
 
     def forward(self, x):
-        batch, height, width, window_height, window_width, _, device, h = (
+        (
+            batch,
+            height,
+            width,
+            window_height,
+            window_width,
+            _,
+            device,
+            h,
+        ) = (
             *x.shape,
             x.device,
             self.heads,
@@ -228,7 +268,10 @@ class Attention(nn.Module):
 
         # split heads
 
-        q, k, v = map(lambda t: rearrange(t, "b n (h d) -> b h n d", h=h), (q, k, v))
+        q, k, v = map(
+            lambda t: rearrange(t, "b n (h d) -> b h n d", h=h),
+            (q, k, v),
+        )
 
         # scale
 
@@ -236,7 +279,10 @@ class Attention(nn.Module):
 
         # null / memory / register kv
 
-        mk, mv = map(lambda t: repeat(t, "h n d -> b h n d", b=q.shape[0]), self.mem_kv)
+        mk, mv = map(
+            lambda t: repeat(t, "h n d -> b h n d", b=q.shape[0]),
+            self.mem_kv,
+        )
         num_mem = mk.shape[-2]
 
         k = torch.cat((mk, k), dim=-2)
@@ -265,13 +311,18 @@ class Attention(nn.Module):
         # merge heads
 
         out = rearrange(
-            out, "b h (w1 w2) d -> b w1 w2 (h d)", w1=window_height, w2=window_width
+            out,
+            "b h (w1 w2) d -> b w1 w2 (h d)",
+            w1=window_height,
+            w2=window_width,
         )
 
         # combine heads out
 
         out = self.to_out(out)
-        return rearrange(out, "(b x y) ... -> b x y ...", x=height, y=width)
+        return rearrange(
+            out, "(b x y) ... -> b x y ...", x=height, y=width
+        )
 
 
 class MaxViT(nn.Module):
@@ -287,19 +338,22 @@ class MaxViT(nn.Module):
         mbconv_expansion_rate=4,
         mbconv_shrinkage_rate=0.25,
         dropout=0.1,
-        channels=3
+        channels=3,
     ):
         super().__init__()
-        assert isinstance(
-            depth, tuple
-        ), "depth needs to be tuple if integers indicating number of transformer blocks at that stage"
+        assert isinstance(depth, tuple), (
+            "depth needs to be tuple if integers indicating number of"
+            " transformer blocks at that stage"
+        )
 
         # convolutional stem
 
         dim_conv_stem = default(dim_conv_stem, dim)
 
         self.conv_stem = nn.Sequential(
-            nn.Conv2d(channels, dim_conv_stem, 3, stride=2, padding=1),
+            nn.Conv2d(
+                channels, dim_conv_stem, 3, stride=2, padding=1
+            ),
             nn.Conv2d(dim_conv_stem, dim_conv_stem, 3, padding=1),
         )
 
@@ -321,9 +375,10 @@ class MaxViT(nn.Module):
 
         cond_hidden_dims = []
 
-        for ind, ((layer_dim_in, layer_dim), layer_depth) in enumerate(
-            zip(dim_pairs, depth)
-        ):
+        for ind, (
+            (layer_dim_in, layer_dim),
+            layer_depth,
+        ) in enumerate(zip(dim_pairs, depth)):
             for stage_ind in range(layer_depth):
                 is_first = stage_ind == 0
                 stage_dim_in = layer_dim_in if is_first else layer_dim
@@ -339,7 +394,9 @@ class MaxViT(nn.Module):
                         shrinkage_rate=mbconv_shrinkage_rate,
                     ),
                     Rearrange(
-                        "b d (x w1) (y w2) -> b x y w1 w2 d", w1=w, w2=w
+                        "b d (x w1) (y w2) -> b x y w1 w2 d",
+                        w1=w,
+                        w2=w,
                     ),  # block-like attention
                     Residual(
                         Attention(
@@ -349,10 +406,14 @@ class MaxViT(nn.Module):
                             window_size=w,
                         )
                     ),
-                    Residual(FeedForward(dim=layer_dim, dropout=dropout)),
+                    Residual(
+                        FeedForward(dim=layer_dim, dropout=dropout)
+                    ),
                     Rearrange("b x y w1 w2 d -> b d (x w1) (y w2)"),
                     Rearrange(
-                        "b d (w1 x) (w2 y) -> b x y w1 w2 d", w1=w, w2=w
+                        "b d (w1 x) (w2 y) -> b x y w1 w2 d",
+                        w1=w,
+                        w2=w,
                     ),  # grid-like attention
                     Residual(
                         Attention(
@@ -362,7 +423,9 @@ class MaxViT(nn.Module):
                             window_size=w,
                         )
                     ),
-                    Residual(FeedForward(dim=layer_dim, dropout=dropout)),
+                    Residual(
+                        FeedForward(dim=layer_dim, dropout=dropout)
+                    ),
                     Rearrange("b x y w1 w2 d -> b d (w1 x) (w2 y)"),
                 )
 
@@ -408,8 +471,6 @@ class MaxViT(nn.Module):
         return self.mlp_head(x)
 
 
-
-
 class VideoViT(nn.Module):
     """
     VideoViT module for video classification using Vision Transformer (ViT).
@@ -440,7 +501,7 @@ class VideoViT(nn.Module):
         dropout=0.1,
         channels=3,
         *args,
-        **kwargs
+        **kwargs,
     ):
         super().__init__()
         self.num_classes = num_classes
@@ -465,10 +526,10 @@ class VideoViT(nn.Module):
             mbconv_shrinkage_rate=mbconv_shrinkage_rate,
             dropout=dropout,
             channels=channels,
-            *args, 
-            **kwargs
+            *args,
+            **kwargs,
         )
-        
+
     def forward(self, x: Tensor, *args, **kwargs) -> Tensor:
         """
         Forward pass of the VideoViT module.
@@ -483,9 +544,10 @@ class VideoViT(nn.Module):
         """
         video = rearrange(x, "b c f h w -> b f c h w")
         images, packed_shape = pack_one(video, "* c h w")
-        tokens = self.vit(images, return_embeddings=True, *args, **kwargs)
+        tokens = self.vit(
+            images, return_embeddings=True, *args, **kwargs
+        )
         print(f"tokens shape: {tokens.shape}")
-        
+
         tokens = unpack_one(tokens, packed_shape, "* c h w")
         return tokens
-        
