@@ -1,11 +1,14 @@
-from typing import Callable, List, Optional, Tuple
-
 import torch
 import torch.nn.functional as F
+from torch import nn, einsum, Tensor
+
+from typing import List, Optional, Callable, Tuple
 from beartype import beartype
-from einops import pack, rearrange, unpack
+
+from einops import pack, unpack, repeat, rearrange
 from einops.layers.torch import Rearrange, Reduce
-from torch import einsum, nn
+
+
 
 # helpers
 
@@ -170,7 +173,7 @@ def MBConv(
 
 
 class Attention(nn.Module):
-    def __init__(self, dim, dim_head=32, dropout=0.0, window_size=7):
+    def __init__(self, dim, dim_head=32, dropout=0.0, window_size=7, num_mem_kv=4):
         super().__init__()
         assert (
             dim % dim_head
@@ -182,6 +185,8 @@ class Attention(nn.Module):
         self.scale = dim_head**-0.5
 
         self.to_qkv = nn.Linear(dim, dim * 3, bias=False)
+
+        self.mem_kv = nn.Parameter(torch.randn(2, self.heads, num_mem_kv, dim_head))
 
         self.attend = nn.Sequential(nn.Softmax(dim=-1), nn.Dropout(dropout))
 
@@ -223,11 +228,19 @@ class Attention(nn.Module):
 
         # split heads
 
-        q, k, v = map(lambda t: rearrange(t, "b n (h d ) -> b h n d", h=h), (q, k, v))
+        q, k, v = map(lambda t: rearrange(t, "b n (h d) -> b h n d", h=h), (q, k, v))
 
         # scale
 
         q = q * self.scale
+
+        # null / memory / register kv
+
+        mk, mv = map(lambda t: repeat(t, "h n d -> b h n d", b=q.shape[0]), self.mem_kv)
+        num_mem = mk.shape[-2]
+
+        k = torch.cat((mk, k), dim=-2)
+        v = torch.cat((mv, v), dim=-2)
 
         # sim
 
@@ -236,6 +249,9 @@ class Attention(nn.Module):
         # add positional bias
 
         bias = self.rel_pos_bias(self.rel_pos_indices)
+
+        bias = F.pad(bias, (0, 0, num_mem, 0), value=0.0)
+
         sim = sim + rearrange(bias, "i j h -> h i j")
 
         # attention
@@ -258,34 +274,7 @@ class Attention(nn.Module):
         return rearrange(out, "(b x y) ... -> b x y ...", x=height, y=width)
 
 
-class VideoVit(nn.Module):
-    """
-    Video Vit
-
-    Args:
-        Num_classes: Number of classes
-        Dim: Embedding dimension
-        Depth: Number of transformer blocks at each stage
-        Dim_head: Dimension per head
-        Dim_conv_stem: Dimension of convolutional stem
-        Window_size: Window size for efficient block - grid like attention
-        Mbconv_expansion_rate: Expansion rate for MBConv
-        Mbconv_shrinkage_rate: Shrinkage rate for MBConv
-        Dropout: Dropout rate
-        Channels: Number of channels in input
-
-    Returns:
-        logits: Classification logits
-
-    Usage:
-    x = torch.randn(1, 3, 224, 224)
-    model = VideoVit(1000, 512, (2, 2, 2, 2), dim_head=64)
-    logits = model(x) # (1, 1000)
-
-
-
-    """
-
+class MaxViT(nn.Module):
     def __init__(
         self,
         *,
@@ -417,3 +406,86 @@ class VideoVit(nn.Module):
             return x
 
         return self.mlp_head(x)
+
+
+
+
+class VideoViT(nn.Module):
+    """
+    VideoViT module for video classification using Vision Transformer (ViT).
+
+    Args:
+        num_classes (int): Number of output classes.
+        dim (int): Dimension of the token embeddings.
+        depth (int): Number of transformer layers.
+        dim_head (int, optional): Dimension of the token head embeddings. Defaults to 32.
+        dim_conv_stem (int, optional): Dimension of the convolutional stem. Defaults to None.
+        window_size (int, optional): Size of the window for local attention. Defaults to 7.
+        mbconv_expansion_rate (int, optional): Expansion rate for the mobile inverted bottleneck convolution. Defaults to 4.
+        mbconv_shrinkage_rate (float, optional): Shrinkage rate for the mobile inverted bottleneck convolution. Defaults to 0.25.
+        dropout (float, optional): Dropout rate. Defaults to 0.1.
+        channels (int, optional): Number of input channels. Defaults to 3.
+    """
+
+    def __init__(
+        self,
+        num_classes,
+        dim,
+        depth,
+        dim_head=32,
+        dim_conv_stem=None,
+        window_size=7,
+        mbconv_expansion_rate=4,
+        mbconv_shrinkage_rate=0.25,
+        dropout=0.1,
+        channels=3,
+        *args,
+        **kwargs
+    ):
+        super().__init__()
+        self.num_classes = num_classes
+        self.dim = dim
+        self.depth = depth
+        self.dim_head = dim_head
+        self.dim_conv_stem = dim_conv_stem
+        self.window_size = window_size
+        self.mbconv_expansion_rate = mbconv_expansion_rate
+        self.mbconv_shrinkage_rate = mbconv_shrinkage_rate
+        self.dropout = dropout
+        self.channels = channels
+
+        self.vit = MaxViT(
+            num_classes=num_classes,
+            dim=dim,
+            depth=depth,
+            dim_head=dim_head,
+            dim_conv_stem=dim_conv_stem,
+            window_size=window_size,
+            mbconv_expansion_rate=mbconv_expansion_rate,
+            mbconv_shrinkage_rate=mbconv_shrinkage_rate,
+            dropout=dropout,
+            channels=channels,
+            *args, 
+            **kwargs
+        )
+        
+    def forward(self, x: Tensor, *args, **kwargs) -> Tensor:
+        """
+        Forward pass of the VideoViT module.
+
+        Args:
+            x (Tensor): Input tensor of shape (batch_size, channels, frames, height, width).
+            *args: Variable length argument list.
+            **kwargs: Arbitrary keyword arguments.
+
+        Returns:
+            Tensor: Output tensor of shape (batch_size, tokens, dim).
+        """
+        video = rearrange(x, "b c f h w -> b f c h w")
+        images, packed_shape = pack_one(video, "* c h w")
+        tokens = self.vit(images, return_embeddings=True, *args, **kwargs)
+        print(f"tokens shape: {tokens.shape}")
+        
+        tokens = unpack_one(tokens, packed_shape, "* c h w")
+        return tokens
+        
